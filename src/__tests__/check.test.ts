@@ -3,10 +3,11 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
 import { lookupReceipts } from '../api';
 import { checkPhoto } from '../check';
+import { C2paFormatError } from '../protocol/c2pa';
 import { buildClaim, leafHash, sha256Hex, signClaim, signedText, softwareSigner } from '../protocol/claim';
 import { parseReceipt, verdictLines, type FetchTx, type Receipt } from '../protocol/receipt';
 import { fixtureBytes, fixtureText } from '../protocol/__fixtures__/c2pa';
-import { C2MA, C2PA, app11, embed, jpeg, manifestStore, superbox } from '../protocol/__fixtures__/jumbf';
+import { C2MA, C2PA, app11, embed, embedReceipt, jpeg, superbox } from '../protocol/__fixtures__/jumbf';
 import vectors from '../protocol/__fixtures__/vectors.json';
 
 jest.mock('expo-secure-store', () => ({ getItemAsync: async () => null }));
@@ -100,9 +101,19 @@ describe('checkPhoto', () => {
     const original = jpeg();
     const r = await receiptFor(original);
     const lookup = jest.fn();
-    const got = await checkPhoto(embed(original, app11(manifestStore(JSON.stringify(r)))), undefined, { fetchTx: fetchTxFor(r), lookup });
+    const got = await checkPhoto(embedReceipt(original, JSON.stringify(r)).bytes, undefined, { fetchTx: fetchTxFor(r), lookup });
     expect(lookup).not.toHaveBeenCalled();
     expect(got).toMatchObject({ found: 'embedded', results: [{ verdict: { ok: true } }] });
+  });
+
+  it('reports a broken c2pa.hash.data hard binding as an error, not no proof found', async () => {
+    const original = jpeg();
+    const r = await receiptFor(original);
+    const tampered = embedReceipt(original, JSON.stringify(r)).bytes;
+    tampered[tampered.length - 5] ^= 0xff;
+    const lookup = jest.fn();
+    await expect(checkPhoto(tampered, undefined, { fetchTx: fetchTxFor(r), lookup })).rejects.toThrow(C2paFormatError);
+    expect(lookup).not.toHaveBeenCalled();
   });
 
   it('uses a receipt file when given one', async () => {

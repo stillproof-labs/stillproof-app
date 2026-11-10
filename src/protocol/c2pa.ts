@@ -1,21 +1,34 @@
 // Reads a receipt embedded in a JPEG as a C2PA manifest store (SPEC.md §8.3),
 // in the format of the Go reference (stillproof, package embed). Read-only: it
 // finds the C2PA APP11 segments, reads the org.stillproof.receipt assertion of
-// the active manifest and gives back the bytes without those segments. It
-// checks neither the C2PA signature nor c2pa.hash.data: the proof is the
-// receipt, and §6 step 2 hashes the bytes it returns.
+// the active manifest, checks its c2pa.hash.data hard binding over the JPEG
+// minus its exclusions, and gives back the bytes without those segments. It
+// does not check the C2PA signature: the proof is the receipt, and §6 step 2
+// hashes the bytes it returns.
 //
 // APP11 framing (ISO/IEC 19566-5, JPEG XT): FF EB, Lp (u16), CI "JP",
 // En (u16), Z (u32, from 1), then box bytes. Every segment after the first
 // repeats the box's LBox and TBox (and XLBox, if used).
 
+import { sha256 } from '@noble/hashes/sha2.js';
+
 export const RECEIPT_LABEL = 'org.stillproof.receipt';
+export const DATA_HASH_LABEL = 'c2pa.hash.data';
 
 /** JUMBF type UUIDs: four ASCII bytes and 0011-0010-8000-00AA00389B71. */
 const uuid = (s: string) =>
   Array.from(s, (ch) => ch.charCodeAt(0).toString(16).padStart(2, '0')).join('') + '00110010800000aa00389b71';
 const UUID_STORE = uuid('c2pa');
 const UUID_ASSERTIONS = uuid('c2as');
+const CBOR_FAIL_PREFIX = DATA_HASH_LABEL;
+
+type DataHash = {
+  exclusions: { start: number; length: number }[];
+  alg: string;
+  hash: Uint8Array;
+};
+
+type CborCursor = { b: Uint8Array; i: number };
 
 export class C2paFormatError extends Error {
   name = 'C2paFormatError';
@@ -145,37 +158,266 @@ function superbox(box: Box): Superbox {
 
 const children = (j: Superbox) => j.content.filter((c) => c.type === 'jumb').map(superbox);
 
-/** The receipt JSON in the active (last) manifest, if it has one. */
-function readReceipt(store: Uint8Array): string | undefined {
+function cborFail(why: string): never {
+  return fail(`${CBOR_FAIL_PREFIX}: ${why}`);
+}
+
+function need(c: CborCursor, n: number): void {
+  if (c.i + n > c.b.length) cborFail('truncated cbor');
+}
+
+function readUintBig(c: CborCursor, ai: number): bigint {
+  if (ai < 24) return BigInt(ai);
+  if (ai === 24) {
+    need(c, 1);
+    return BigInt(c.b[c.i++]);
+  }
+  if (ai === 25) {
+    need(c, 2);
+    const v = u16(c.b, c.i);
+    c.i += 2;
+    return BigInt(v);
+  }
+  if (ai === 26) {
+    need(c, 4);
+    const v = u32(c.b, c.i);
+    c.i += 4;
+    return BigInt(v);
+  }
+  if (ai === 27) {
+    need(c, 8);
+    const hi = BigInt(u32(c.b, c.i));
+    const lo = BigInt(u32(c.b, c.i + 4));
+    c.i += 8;
+    return (hi << 32n) | lo;
+  }
+  return cborFail('unsupported cbor length');
+}
+
+function toSafeInt(n: bigint): number {
+  if (n > BigInt(Number.MAX_SAFE_INTEGER)) cborFail('integer out of range');
+  return Number(n);
+}
+
+function concatChunks(chunks: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(chunks.reduce((n, ch) => n + ch.length, 0));
+  let o = 0;
+  for (const ch of chunks) {
+    out.set(ch, o);
+    o += ch.length;
+  }
+  return out;
+}
+
+function readCborBytes(c: CborCursor, majorExpected: 2 | 3, ai: number): Uint8Array {
+  if (ai !== 31) {
+    const len = toSafeInt(readUintBig(c, ai));
+    need(c, len);
+    const slice = c.b.subarray(c.i, c.i + len);
+    c.i += len;
+    return slice;
+  }
+  const chunks: Uint8Array[] = [];
+  for (;;) {
+    need(c, 1);
+    if (c.b[c.i] === 0xff) {
+      c.i++;
+      return concatChunks(chunks);
+    }
+    const init = c.b[c.i++];
+    const major = init >> 5;
+    const chunkAi = init & 0x1f;
+    if (major !== majorExpected || chunkAi === 31) cborFail('bad indefinite string chunk');
+    chunks.push(readCborBytes(c, majorExpected, chunkAi));
+  }
+}
+
+function readCborValue(c: CborCursor, depth = 0): unknown {
+  if (depth > 16) cborFail('nesting too deep');
+  need(c, 1);
+  const init = c.b[c.i++];
+  const major = init >> 5;
+  const ai = init & 0x1f;
+
+  switch (major) {
+    case 0:
+      return toSafeInt(readUintBig(c, ai));
+    case 1:
+      return -1 - toSafeInt(readUintBig(c, ai));
+    case 2:
+      return readCborBytes(c, 2, ai);
+    case 3:
+      return utf8(readCborBytes(c, 3, ai));
+    case 4: {
+      const arr: unknown[] = [];
+      if (ai === 31) {
+        for (;;) {
+          need(c, 1);
+          if (c.b[c.i] === 0xff) {
+            c.i++;
+            return arr;
+          }
+          arr.push(readCborValue(c, depth + 1));
+        }
+      }
+      const len = toSafeInt(readUintBig(c, ai));
+      if (len > c.b.length - c.i) cborFail('truncated cbor');
+      for (let k = 0; k < len; k++) arr.push(readCborValue(c, depth + 1));
+      return arr;
+    }
+    case 5: {
+      const map = new Map<unknown, unknown>();
+      if (ai === 31) {
+        for (;;) {
+          need(c, 1);
+          if (c.b[c.i] === 0xff) {
+            c.i++;
+            return map;
+          }
+          const k = readCborValue(c, depth + 1);
+          const v = readCborValue(c, depth + 1);
+          map.set(k, v);
+        }
+      }
+      const len = toSafeInt(readUintBig(c, ai));
+      if (len * 2 > c.b.length - c.i) cborFail('truncated cbor');
+      for (let k = 0; k < len; k++) {
+        const key = readCborValue(c, depth + 1);
+        const val = readCborValue(c, depth + 1);
+        map.set(key, val);
+      }
+      return map;
+    }
+    case 6:
+      readUintBig(c, ai);
+      return readCborValue(c, depth + 1);
+    case 7:
+      if (ai === 20) return false;
+      if (ai === 21) return true;
+      if (ai === 22) return null;
+      if (ai === 23) return undefined;
+      if (ai === 24) {
+        need(c, 1);
+        return c.b[c.i++];
+      }
+      if (ai === 25) {
+        need(c, 2);
+        c.i += 2;
+        return NaN;
+      }
+      if (ai === 26) {
+        need(c, 4);
+        const v = new DataView(c.b.buffer, c.b.byteOffset + c.i, 4).getFloat32(0);
+        c.i += 4;
+        return v;
+      }
+      if (ai === 27) {
+        need(c, 8);
+        const v = new DataView(c.b.buffer, c.b.byteOffset + c.i, 8).getFloat64(0);
+        c.i += 8;
+        return v;
+      }
+      return cborFail('unsupported cbor simple value');
+    default:
+      return cborFail('unexpected cbor major type');
+  }
+}
+
+function parseDataHash(raw: Uint8Array): DataHash {
+  const c: CborCursor = { b: raw, i: 0 };
+  const top = readCborValue(c);
+  if (c.i !== raw.length) cborFail('trailing bytes');
+  if (!(top instanceof Map)) cborFail('expected a map');
+
+  const exclusions: { start: number; length: number }[] = [];
+  const rawExclusions = top.get('exclusions');
+  if (rawExclusions !== undefined && rawExclusions !== null) {
+    if (!Array.isArray(rawExclusions)) cborFail('exclusions must be an array');
+    for (const item of rawExclusions) {
+      if (!(item instanceof Map)) cborFail('exclusion must be a map');
+      const start = item.get('start') ?? 0;
+      const length = item.get('length') ?? 0;
+      if (typeof start !== 'number' || !Number.isSafeInteger(start) || typeof length !== 'number' || !Number.isSafeInteger(length)) {
+        cborFail('bad exclusion');
+      }
+      exclusions.push({ start, length });
+    }
+  }
+
+  const rawAlg = top.get('alg');
+  let alg = '';
+  if (rawAlg !== undefined && rawAlg !== null) {
+    if (typeof rawAlg !== 'string') cborFail('alg must be a string');
+    alg = rawAlg;
+  }
+
+  const hash = top.get('hash');
+  if (!(hash instanceof Uint8Array)) cborFail('hash must be bytes');
+
+  return { exclusions, alg, hash };
+}
+
+function checkDataHash(jpeg: Uint8Array, dh: DataHash): void {
+  if (dh.alg !== '' && dh.alg !== 'sha256') {
+    cborFail(`unsupported alg ${JSON.stringify(dh.alg)}`);
+  }
+  const h = sha256.create();
+  let from = 0;
+  for (const x of dh.exclusions) {
+    if (x.start < from || x.length < 0 || x.start > jpeg.length - x.length) {
+      cborFail('bad exclusion');
+    }
+    h.update(jpeg.subarray(from, x.start));
+    from = x.start + x.length;
+  }
+  h.update(jpeg.subarray(from));
+  const sum = h.digest();
+  if (sum.length !== dh.hash.length || !sum.every((b, i) => b === dh.hash[i])) {
+    fail('the JPEG does not match its C2PA hard binding (c2pa.hash.data)');
+  }
+}
+
+/** The receipt JSON and data hash assertion in the active (last) manifest, if present. */
+function readManifest(store: Uint8Array): { receipt?: string; dataHash?: DataHash } {
   const top = boxes(store);
   if (top.length !== 1) fail('expected one manifest store box');
   const sb = superbox(top[0]);
   const manifests = children(sb);
   if (sb.uuid !== UUID_STORE || manifests.length === 0) fail('no manifest in the store');
   let receipt: string | undefined;
+  let hashCbor: Uint8Array | undefined;
   for (const part of children(manifests[manifests.length - 1])) {
     if (part.uuid !== UUID_ASSERTIONS) continue;
     for (const a of children(part)) {
-      if (a.label !== RECEIPT_LABEL) continue;
-      const json = a.content.find((c) => c.type === 'json');
-      if (!json) fail(`${RECEIPT_LABEL} has no json box`);
-      receipt = utf8(json.body);
+      if (a.label === RECEIPT_LABEL) {
+        const json = a.content.find((c) => c.type === 'json');
+        if (!json) fail(`${RECEIPT_LABEL} has no json box`);
+        receipt = utf8(json.body);
+      } else if (a.label === DATA_HASH_LABEL) {
+        const cbor = a.content.find((c) => c.type === 'cbor');
+        if (!cbor) fail(`${DATA_HASH_LABEL} has no cbor box`);
+        hashCbor = cbor.body;
+      }
     }
   }
-  return receipt;
+  if (receipt !== undefined && hashCbor === undefined) {
+    fail(`the C2PA manifest has no ${DATA_HASH_LABEL} assertion`);
+  }
+  return { receipt, dataHash: hashCbor ? parseDataHash(hashCbor) : undefined };
 }
 
 /**
  * Reads the C2PA manifest store in a JPEG. Returns { c2pa: false } for a file
  * that is not a well-formed JPEG or has no store. Throws C2paFormatError if
- * the store is malformed.
+ * the store is malformed or its c2pa.hash.data binding fails.
  */
 export function readC2pa(bytes: Uint8Array): C2paRead {
   const segs = segments(bytes);
   if (!segs) return { c2pa: false };
   const { found, store } = c2paSegments(bytes, segs);
   if (found.length === 0) return { c2pa: false };
-  const receipt = readReceipt(store);
+  const { receipt, dataHash } = readManifest(store);
+  if (dataHash) checkDataHash(bytes, dataHash);
 
   const original = new Uint8Array(bytes.length - found.reduce((n, s) => n + s.end - s.start, 0));
   let from = 0;

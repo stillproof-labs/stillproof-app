@@ -1,11 +1,13 @@
 // Test-only writer for C2PA APP11 JUMBF segments, per ISO/IEC 19566-5. Files
 // written by the Go reference itself are in ./c2pa.
+import { sha256 } from '@noble/hashes/sha2.js';
 import { hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js';
 
 export const C2PA = '6332706100110010800000aa00389b71';
 export const C2MA = '63326d6100110010800000aa00389b71';
 export const C2AS = '6332617300110010800000aa00389b71';
 export const JSON_UUID = '6a736f6e00110010800000aa00389b71';
+export const CBOR_UUID = '63626f7200110010800000aa00389b71';
 
 export function cat(...parts: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
@@ -24,11 +26,84 @@ export const box = (type: string, body: Uint8Array) => cat(be(8 + body.length, 4
 export const superbox = (uuid: string, label: string, ...content: Uint8Array[]) =>
   box('jumb', cat(box('jumd', cat(hexToBytes(uuid), Uint8Array.of(0x03), utf8ToBytes(label), Uint8Array.of(0))), ...content));
 
-/** A manifest store whose active (last) manifest has the receipt assertion. */
-export function manifestStore(receiptJson: string, extraManifests: Uint8Array[] = []): Uint8Array {
-  const assertion = superbox(JSON_UUID, 'org.stillproof.receipt', box('json', utf8ToBytes(receiptJson)));
-  const manifest = superbox(C2MA, 'urn:uuid:00000000-0000-4000-8000-000000000000', superbox(C2AS, 'c2pa.assertions', assertion));
+function cborHead(major: number, n: number): Uint8Array {
+  const m = major << 5;
+  if (n < 24) return Uint8Array.of(m | n);
+  if (n < 0x100) return Uint8Array.of(m | 24, n);
+  if (n < 0x10000) return Uint8Array.of(m | 25, n >> 8, n & 0xff);
+  return cat(Uint8Array.of(m | 26), be(n, 4));
+}
+
+export function cborEncode(v: unknown): Uint8Array {
+  if (typeof v === 'number') return v >= 0 ? cborHead(0, v) : cborHead(1, -1 - v);
+  if (v instanceof Uint8Array) return cat(cborHead(2, v.length), v);
+  if (typeof v === 'string') {
+    const b = utf8ToBytes(v);
+    return cat(cborHead(3, b.length), b);
+  }
+  if (Array.isArray(v)) return cat(cborHead(4, v.length), ...v.map(cborEncode));
+  if (v && typeof v === 'object') {
+    const entries = Object.entries(v).filter(([, val]) => val !== undefined);
+    return cat(cborHead(5, entries.length), ...entries.flatMap(([k, val]) => [cborEncode(k), cborEncode(val)]));
+  }
+  throw new Error(`unsupported test CBOR value: ${String(v)}`);
+}
+
+export type DataHashSpec = {
+  exclusions: { start: number; length: number }[];
+  alg?: string;
+  hash: Uint8Array;
+};
+
+/** A manifest store whose active (last) manifest has the receipt assertion (and optional c2pa.hash.data). */
+export function manifestStore(receiptJson: string, extraManifests: Uint8Array[] = [], dataHash?: DataHashSpec): Uint8Array {
+  const assertions = [superbox(JSON_UUID, 'org.stillproof.receipt', box('json', utf8ToBytes(receiptJson)))];
+  if (dataHash) {
+    assertions.push(
+      superbox(
+        CBOR_UUID,
+        'c2pa.hash.data',
+        box('cbor', cborEncode({ exclusions: dataHash.exclusions, alg: dataHash.alg, hash: dataHash.hash })),
+      ),
+    );
+  }
+  const manifest = superbox(C2MA, 'urn:uuid:00000000-0000-4000-8000-000000000000', superbox(C2AS, 'c2pa.assertions', ...assertions));
   return superbox(C2PA, 'c2pa', ...extraManifests, manifest);
+}
+
+/** Inserts a manifest store after APP0 with a converging c2pa.hash.data exclusion over the inserted APP11 bytes. */
+export function embedReceipt(
+  original: Uint8Array,
+  receiptJson: string,
+  opts: {
+    en?: number;
+    chunk?: number;
+    extraManifests?: Uint8Array[];
+    alg?: string;
+    exclusions?: { start: number; length: number }[];
+    hash?: Uint8Array;
+  } = {},
+): { bytes: Uint8Array; segments: Uint8Array[] } {
+  const pos = 2 + 2 + ((original[4] << 8) | original[5]);
+  const hash = opts.hash ?? sha256(original);
+  let len = 0;
+  for (let i = 0; i < 8; i++) {
+    const segs = app11(
+      manifestStore(receiptJson, opts.extraManifests, {
+        exclusions: opts.exclusions ?? [{ start: pos, length: len }],
+        alg: opts.alg === undefined ? 'sha256' : opts.alg || undefined,
+        hash,
+      }),
+      opts.en,
+      opts.chunk,
+    );
+    const total = segs.reduce((n, s) => n + s.length, 0);
+    if (total === len || opts.exclusions !== undefined) {
+      return { bytes: embed(original, segs), segments: segs };
+    }
+    len = total;
+  }
+  throw new Error('dataHash exclusion length did not settle');
 }
 
 /** APP11 segments for one JUMBF box, splitting it every `chunk` payload bytes. */

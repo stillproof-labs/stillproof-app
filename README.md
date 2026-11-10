@@ -46,8 +46,9 @@ Two more limits apply to this version:
   its receipt (`<id>.stillproof.json`).
 - **Check a photo:** pick a photo from the library or Files, with or without
   a receipt file, and check it (SPEC §6). With no receipt file, the app reads
-  a receipt embedded as C2PA (SPEC §8.3), or else looks the file's SHA-256 up
-  with `GET /v1/receipts?sha256=` (SPEC §8.4). Checking never anchors
+  a receipt embedded as C2PA and checks its `c2pa.hash.data` hard binding
+  (SPEC §8.3, leaving the C2PA signature unchecked), or else looks the file's
+  SHA-256 up with `GET /v1/receipts?sha256=` (SPEC §8.4). Checking never anchors
   anything. Only the anchor transaction is read from Stellar's Horizon API.
   The app reads receipt v1 fields but doesn't verify attestation chains or
   Externalize proofs: it shows a claimed key level as claimed and points to
@@ -64,7 +65,7 @@ darkroom (dark, the default) and print (light, when the system is light).
 
 | Path | Contents |
 |---|---|
-| `src/protocol/` | Pure TypeScript protocol code with no React: `claim.ts` (build, sign, parse, verify), `merkle.ts` (inclusion proofs), `receipt.ts` (receipt v0 and v1 parsing, verification and verdicts), `c2pa.ts` (reads an embedded receipt) |
+| `src/protocol/` | Pure TypeScript protocol code with no React: `claim.ts` (build, sign, parse, verify), `merkle.ts` (inclusion proofs), `receipt.ts` (receipt v0 and v1 parsing, verification and verdicts), `c2pa.ts` (reads an embedded receipt and checks `c2pa.hash.data`) |
 | `src/keys.ts` | The device key: hardware where the device and the anchoring service allow, else software |
 | `modules/stillproof-keys/` | Local Expo module: the Android Keystore (Kotlin) and Secure Enclave / App Attest (Swift) key |
 | `src/captures.ts`, `src/api.ts`, `src/anchorUrl.ts` | Local capture storage, the anchoring service client and its stored URL |
