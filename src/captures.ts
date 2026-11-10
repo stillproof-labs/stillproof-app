@@ -64,6 +64,8 @@ export function useCapture(id: string): Capture | undefined {
   return useCaptures().find((c) => c.id === id);
 }
 
+export const listCaptures = (): Capture[] => [...all()];
+
 export const photoFile = (c: Capture) => new File(dir, c.photo);
 export const receiptFile = (c: Capture) => new File(dir, c.receipt ?? `${c.id}.stillproof.json`);
 
