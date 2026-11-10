@@ -1,8 +1,8 @@
 import * as Sharing from 'expo-sharing';
 import { useEffect, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Alert, StyleSheet, View } from 'react-native';
 
-import { photoFile, receiptFile, submit, useCaptures } from '../captures';
+import { deleteCapture, photoFile, receiptFile, submit, useCaptures } from '../captures';
 import { Hash } from '../components/Fingerprint';
 import { PrintFrame } from '../components/PrintFrame';
 import { ProofStrip } from '../components/ProofStrip';
@@ -13,7 +13,7 @@ import { parseSignedClaim } from '../protocol/claim';
 import { KEY_LEVEL, formatCaptured, horizonFetchTx, parseReceipt, verifyReceipt, type Receipt, type Verdict } from '../protocol/receipt';
 import { space } from '../theme';
 
-export default function CaptureDetailScreen({ route }: ScreenProps<'Detail'>) {
+export default function CaptureDetailScreen({ route, navigation }: ScreenProps<'Detail'>) {
   const captures = useCaptures();
   const index = captures.findIndex((x) => x.id === route.params.id);
   const capture = captures[index];
@@ -100,6 +100,29 @@ export default function CaptureDetailScreen({ route }: ScreenProps<'Detail'>) {
         {anchored && <Body muted>Send both files. The receipt only verifies with the original photo.</Body>}
         {shareError && <ErrorText>Could not share: {shareError}</ErrorText>}
       </View>
+
+      <Rule />
+      <Button
+        title="Delete"
+        label="Delete frame"
+        onPress={() =>
+          Alert.alert(
+            'Delete frame',
+            'This removes the photo and any receipt from this phone only. It never contacts the anchoring service, so any anchored hash stays on Stellar. The receipt will not verify without this exact photo — consider sharing both files first.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: 'Delete',
+                style: 'destructive',
+                onPress: () => {
+                  deleteCapture(capture.id);
+                  navigation.goBack();
+                },
+              },
+            ],
+          )
+        }
+      />
     </Screen>
   );
 }

@@ -31,10 +31,28 @@ const MEDIA_TYPES: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jp
 let captures: Capture[] | undefined;
 const listeners = new Set<() => void>();
 
+function cleanupOrphans(list: Capture[]): void {
+  const referenced = new Set<string>(['captures.json']);
+  for (const c of list) {
+    referenced.add(c.photo);
+    referenced.add(c.receipt ?? `${c.id}.stillproof.json`);
+  }
+  for (const entry of dir.list()) {
+    if (entry instanceof File && entry.name.startsWith('staged-') && !referenced.has(entry.name)) {
+      try {
+        if (entry.exists) entry.delete();
+      } catch {
+        // Best-effort orphan cleanup; keep existing captures usable.
+      }
+    }
+  }
+}
+
 function all(): Capture[] {
   if (!captures) {
     if (!dir.exists) dir.create({ intermediates: true });
     captures = indexFile.exists ? (JSON.parse(indexFile.textSync()) as Capture[]) : [];
+    cleanupOrphans(captures);
   }
   return captures;
 }
@@ -60,12 +78,35 @@ export function useCaptures(): Capture[] {
   return useSyncExternalStore(subscribe, all);
 }
 
+export function listCaptures(): readonly Capture[] {
+  return all();
+}
+
 export function useCapture(id: string): Capture | undefined {
   return useCaptures().find((c) => c.id === id);
 }
 
 export const photoFile = (c: Capture) => new File(dir, c.photo);
 export const receiptFile = (c: Capture) => new File(dir, c.receipt ?? `${c.id}.stillproof.json`);
+
+/**
+ * Deletes a capture from this device: its photo, receipt file and index entry
+ * in one save. Never contacts the anchoring service; any anchored hash stays
+ * on Stellar.
+ */
+export function deleteCapture(id: string): void {
+  const list = all();
+  const target = list.find((c) => c.id === id);
+  if (!target) return;
+
+  const rest = list.filter((c) => c.id !== id);
+  const photo = photoFile(target);
+  if (photo.exists && !rest.some((c) => c.photo === target.photo)) photo.delete();
+  const receipt = receiptFile(target);
+  if (receipt.exists && !rest.some((c) => (c.receipt ?? `${c.id}.stillproof.json`) === receipt.name)) receipt.delete();
+
+  save(rest);
+}
 
 /**
  * Stores a photo the camera just wrote, signs its claim and submits it.
