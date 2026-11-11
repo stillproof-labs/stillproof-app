@@ -11,6 +11,7 @@ import type { ScreenProps } from '../navigation';
 import { space, useTheme } from '../theme';
 
 const STATUS: Record<Capture['status'], string> = {
+  queued: 'queued, waiting for connection',
   pending: 'pending, waiting for the anchor',
   anchored: 'anchored',
   failed: 'failed',
@@ -21,7 +22,7 @@ export default function CapturesScreen({ navigation }: ScreenProps<'Captures'>) 
   const insets = useSafeAreaInsets();
   const captures = useCaptures();
   const anyPending = captures.some((x) => x.status === 'pending');
-  const counts = { pending: 0, anchored: 0, failed: 0 };
+  const counts = { queued: 0, pending: 0, anchored: 0, failed: 0 };
   captures.forEach((x) => counts[x.status]++);
 
   useLayoutEffect(() => {
@@ -67,6 +68,7 @@ export default function CapturesScreen({ navigation }: ScreenProps<'Captures'>) 
             `${captures.length} ${captures.length === 1 ? 'frame' : 'frames'}`,
             counts.anchored > 0 && `${counts.anchored} anchored`,
             counts.pending > 0 && `${counts.pending} pending`,
+            counts.queued > 0 && `${counts.queued} queued`,
             counts.failed > 0 && `${counts.failed} failed`,
             NETWORK,
           )}

@@ -69,6 +69,14 @@ export default function CaptureDetailScreen({ route }: ScreenProps<'Detail'>) {
         edge={edge(`Frame ${frame}`, time, receipt && `Ledger ${receipt.anchor.ledger}`)}
       />
 
+      {capture.status === 'queued' && (
+        <View style={styles.block}>
+          <EdgeLabel>Queued</EdgeLabel>
+          <Body>Signed on this phone. It will submit automatically when the network returns.</Body>
+          {capture.error && <Body muted>{capture.error}</Body>}
+          <Button title="Submit now" label="Try submitting the claim now" onPress={() => void submit(capture)} />
+        </View>
+      )}
       {capture.status === 'pending' && (
         <View style={styles.block}>
           <EdgeLabel>Pending</EdgeLabel>

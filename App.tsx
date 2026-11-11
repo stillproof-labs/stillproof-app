@@ -12,6 +12,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
+import { useCaptureSync } from './src/captures';
 import { Header } from './src/components/Header';
 import type { RootStackParamList } from './src/navigation';
 import CaptureDetailScreen from './src/screens/CaptureDetailScreen';
@@ -34,6 +35,7 @@ export default function App() {
     FragmentMono_400Regular,
   });
   const { scheme, c } = useTheme();
+  useCaptureSync();
 
   // Hold the splash until the fonts load; on a load error, carry on with system fonts.
   useEffect(() => {

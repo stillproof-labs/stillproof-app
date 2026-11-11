@@ -3,16 +3,40 @@ import type { Attestation } from '../modules/stillproof-keys';
 import { anchorUrl } from './anchorUrl';
 import { parseReceipt, type Receipt } from './protocol/receipt';
 
+const CLAIM_TIMEOUT_MS = 15000;
+
+/** Permanent 4xx rejection from the anchoring service; caller should fail rather than requeue. */
+export class ClaimRejectedError extends Error {
+  name = 'ClaimRejectedError';
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 export async function submitClaim(signed: string): Promise<string> {
-  const res = await fetch(`${await anchorUrl()}/v1/claims`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
-    body: signed,
-  });
-  if (res.status !== 202) throw new Error(`service rejected the claim (${res.status}): ${(await res.text()).trim()}`);
-  const { id } = (await res.json()) as { id?: unknown };
-  if (typeof id !== 'string') throw new Error('service returned no id');
-  return id;
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), CLAIM_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${await anchorUrl()}/v1/claims`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: signed,
+      signal: abort.signal,
+    });
+    if (res.status !== 202) {
+      const msg = `service rejected the claim (${res.status}): ${(await res.text()).trim()}`;
+      if (res.status >= 400 && res.status < 500) throw new ClaimRejectedError(res.status, msg);
+      throw new Error(msg);
+    }
+    const { id } = (await res.json()) as { id?: unknown };
+    if (typeof id !== 'string') throw new Error('service returned no id');
+    return id;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export type ReceiptResult =

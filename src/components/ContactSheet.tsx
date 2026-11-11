@@ -3,7 +3,7 @@ import { Image, Pressable, StyleSheet, View, useWindowDimensions } from 'react-n
 import { hairline, space, useTheme } from '../theme';
 import { EdgeLabel } from './ui';
 
-export type SheetStatus = 'pending' | 'anchored' | 'failed';
+export type SheetStatus = 'queued' | 'pending' | 'anchored' | 'failed';
 
 export type SheetFrame = {
   key: string;
@@ -24,7 +24,7 @@ export function ContactSheet({ frames }: { frames: SheetFrame[] }) {
   const { c } = useTheme();
   const { width } = useWindowDimensions();
   const side = Math.floor((width - 2 * space[4] - (COLUMNS - 1) * GAP) / COLUMNS);
-  const dot: Record<SheetStatus, string> = { pending: c.safelight, anchored: c.ok, failed: c.fail };
+  const dot: Record<SheetStatus, string> = { queued: c.muted, pending: c.safelight, anchored: c.ok, failed: c.fail };
   return (
     <View style={styles.sheet}>
       {frames.map((f) => (
